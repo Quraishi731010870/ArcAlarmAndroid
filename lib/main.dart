@@ -56,6 +56,7 @@ class Alarm {
     this.snooze = true,
     this.snoozeMinutes = 9,
     this.fade = true,
+    this.preAlarm = false,
     this.enabled = true,
   }) : days = days ?? {};
   final int id;
@@ -63,6 +64,7 @@ class Alarm {
   String label;
   Set<int> days;
   bool vibration, snooze, fade, enabled;
+  bool preAlarm;
   String sound;
   int snoozeMinutes;
   Map<String, dynamic> toJson() => {
@@ -76,6 +78,7 @@ class Alarm {
     'snooze': snooze,
     'snoozeMinutes': snoozeMinutes,
     'fade': fade,
+    'preAlarm': preAlarm,
     'enabled': enabled,
   };
   factory Alarm.fromJson(Map<String, dynamic> j) => Alarm(
@@ -89,6 +92,7 @@ class Alarm {
     snooze: j['snooze'] ?? true,
     snoozeMinutes: j['snoozeMinutes'] ?? 9,
     fade: j['fade'] ?? true,
+    preAlarm: j['preAlarm'] ?? false,
     enabled: j['enabled'] ?? true,
   );
   Alarm copy() => Alarm.fromJson(toJson());
@@ -97,6 +101,7 @@ class Alarm {
 class AlarmStore extends ChangeNotifier {
   final alarms = <Alarm>[];
   bool use24 = false;
+  String? lastNotificationError;
   Future<void> load() async {
     final p = await SharedPreferences.getInstance();
     use24 = p.getBool('use24') ?? false;
@@ -117,15 +122,27 @@ class AlarmStore extends ChangeNotifier {
     }
     _sort();
     await _persist();
-    await Notifications.instance.schedule(a);
     notifyListeners();
+    try {
+      await Notifications.instance.schedule(a);
+      lastNotificationError = null;
+    } catch (error) {
+      // The alarm must remain saved even when Android denies a notification
+      // capability. The UI can explain that scheduling needs attention.
+      lastNotificationError = error.toString();
+    }
   }
 
   Future<void> toggle(Alarm a, bool v) async {
     a.enabled = v;
     await _persist();
-    await Notifications.instance.schedule(a);
     notifyListeners();
+    try {
+      await Notifications.instance.schedule(a);
+      lastNotificationError = null;
+    } catch (error) {
+      lastNotificationError = error.toString();
+    }
   }
 
   Future<void> remove(Alarm a) async {
@@ -177,26 +194,47 @@ class Notifications {
         priority: Priority.high,
         category: AndroidNotificationCategory.alarm,
         enableVibration: a.vibration,
-        fullScreenIntent: true,
       ),
     );
+    final baseId = a.id.abs() % 10000000;
     if (a.days.isEmpty) {
       final n = DateTime.now();
       var t = DateTime(n.year, n.month, n.day, a.hour, a.minute);
       if (!t.isAfter(n)) t = t.add(const Duration(days: 1));
       await plugin.zonedSchedule(
-        id: a.id,
+        id: baseId * 100,
         title: a.label,
         body: 'Your alarm is ringing',
         scheduledDate: tz.TZDateTime.from(t.toUtc(), tz.UTC),
         notificationDetails: d,
         androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
       );
+      if (a.preAlarm) {
+        final early = t.subtract(const Duration(minutes: 10));
+        if (early.isAfter(DateTime.now())) {
+          await plugin.zonedSchedule(
+            id: baseId * 100 + 20,
+            title: 'Alarm in 10 minutes',
+            body: a.label,
+            scheduledDate: tz.TZDateTime.from(early.toUtc(), tz.UTC),
+            notificationDetails: const NotificationDetails(
+              android: AndroidNotificationDetails(
+                'arc_alarm_reminders',
+                'Upcoming alarm reminders',
+                channelDescription: 'Gentle reminders before an alarm',
+                importance: Importance.defaultImportance,
+                priority: Priority.defaultPriority,
+              ),
+            ),
+            androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+          );
+        }
+      }
     } else {
       for (final day in a.days) {
         final t = _next(a.hour, a.minute, day);
         await plugin.zonedSchedule(
-          id: a.id * 10 + day,
+          id: baseId * 100 + day,
           title: a.label,
           body: 'Your alarm is ringing',
           scheduledDate: tz.TZDateTime.from(t.toUtc(), tz.UTC),
@@ -204,6 +242,29 @@ class Notifications {
           androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
           matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
         );
+        if (a.preAlarm) {
+          var early = t.subtract(const Duration(minutes: 10));
+          if (!early.isAfter(DateTime.now())) {
+            early = early.add(const Duration(days: 7));
+          }
+          await plugin.zonedSchedule(
+            id: baseId * 100 + 20 + day,
+            title: 'Alarm in 10 minutes',
+            body: a.label,
+            scheduledDate: tz.TZDateTime.from(early.toUtc(), tz.UTC),
+            notificationDetails: const NotificationDetails(
+              android: AndroidNotificationDetails(
+                'arc_alarm_reminders',
+                'Upcoming alarm reminders',
+                channelDescription: 'Gentle reminders before an alarm',
+                importance: Importance.defaultImportance,
+                priority: Priority.defaultPriority,
+              ),
+            ),
+            androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+            matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
+          );
+        }
       }
     }
   }
@@ -218,9 +279,12 @@ class Notifications {
   }
 
   Future<void> cancel(Alarm a) async {
-    await plugin.cancel(id: a.id);
+    final baseId = a.id.abs() % 10000000;
+    await plugin.cancel(id: baseId * 100);
+    await plugin.cancel(id: baseId * 100 + 20);
     for (var i = 1; i <= 7; i++) {
-      await plugin.cancel(id: a.id * 10 + i);
+      await plugin.cancel(id: baseId * 100 + i);
+      await plugin.cancel(id: baseId * 100 + 20 + i);
     }
   }
 }
@@ -415,7 +479,7 @@ class _SetAlarmState extends State<SetAlarm> {
     alarm =
         widget.alarm ??
         Alarm(
-          id: n.microsecondsSinceEpoch.remainder(2000000000),
+          id: n.microsecondsSinceEpoch.remainder(100000000),
           hour: n.hour,
           minute: n.minute,
         );
@@ -461,9 +525,7 @@ class _SetAlarmState extends State<SetAlarm> {
                       ),
                     ),
                     Text(
-                      alarm.days.isEmpty
-                          ? 'Next alarm · Once'
-                          : daysText(alarm.days),
+                      '${alarmInText(alarm.hour, alarm.minute, alarm.days)}  ·  ${daysText(alarm.days)}',
                       style: const TextStyle(color: Colors.white54),
                     ),
                     const SizedBox(height: 18),
@@ -488,6 +550,7 @@ class _SetAlarmState extends State<SetAlarm> {
                         );
                       },
                     ),
+                    _precisionControls(),
                     if (!widget.store.use24) _period(),
                     const SizedBox(height: 22),
                     _options(),
@@ -590,6 +653,42 @@ class _SetAlarmState extends State<SetAlarm> {
     onSelectionChanged: (s) =>
         setState(() => alarm.hour = alarm.hour % 12 + (s.first == 1 ? 12 : 0)),
   );
+  Widget _precisionControls() => Padding(
+    padding: const EdgeInsets.only(bottom: 12),
+    child: Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        IconButton.outlined(
+          tooltip: mode == DialMode.hours ? 'Previous hour' : 'Previous minute',
+          onPressed: () => _nudge(-1),
+          icon: const Icon(Icons.remove),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Text(
+            mode == DialMode.hours ? '1 hour steps' : '1 minute steps',
+            style: const TextStyle(color: Colors.white54, fontSize: 12),
+          ),
+        ),
+        IconButton.outlined(
+          tooltip: mode == DialMode.hours ? 'Next hour' : 'Next minute',
+          onPressed: () => _nudge(1),
+          icon: const Icon(Icons.add),
+        ),
+      ],
+    ),
+  );
+  void _nudge(int delta) {
+    setState(() {
+      if (mode == DialMode.hours) {
+        alarm.hour = (alarm.hour + delta + 24) % 24;
+      } else {
+        alarm.minute = (alarm.minute + delta + 60) % 60;
+      }
+    });
+    HapticFeedback.selectionClick();
+  }
+
   Widget _options() => Column(
     children: [
       _card(
@@ -613,6 +712,18 @@ class _SetAlarmState extends State<SetAlarm> {
                 SizedBox(width: 10),
                 Text('Repeat', style: TextStyle(fontWeight: FontWeight.w700)),
               ],
+            ),
+            const SizedBox(height: 12),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  _repeatPreset('Once', <int>{}),
+                  _repeatPreset('Weekdays', {1, 2, 3, 4, 5}),
+                  _repeatPreset('Weekends', {6, 7}),
+                  _repeatPreset('Every day', {1, 2, 3, 4, 5, 6, 7}),
+                ],
+              ),
             ),
             const SizedBox(height: 14),
             Row(
@@ -676,6 +787,13 @@ class _SetAlarmState extends State<SetAlarm> {
             ),
             const Divider(),
             _toggle(
+              Icons.notifications_active_outlined,
+              'Remind me 10 minutes before',
+              alarm.preAlarm,
+              (v) => setState(() => alarm.preAlarm = v),
+            ),
+            const Divider(),
+            _toggle(
               Icons.snooze,
               'Snooze',
               alarm.snooze,
@@ -723,6 +841,19 @@ class _SetAlarmState extends State<SetAlarm> {
       Switch(value: v, onChanged: c),
     ],
   );
+  Widget _repeatPreset(String title, Set<int> value) {
+    final selected =
+        alarm.days.length == value.length && alarm.days.containsAll(value);
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: ChoiceChip(
+        label: Text(title),
+        selected: selected,
+        onSelected: (_) => setState(() => alarm.days = {...value}),
+      ),
+    );
+  }
+
   Widget _card(Widget c) => Container(
     width: double.infinity,
     padding: const EdgeInsets.all(16),
@@ -737,13 +868,27 @@ class _SetAlarmState extends State<SetAlarm> {
     if (saving) return;
     setState(() => saving = true);
     alarm.label = label.text.trim().isEmpty ? 'Alarm' : label.text.trim();
-    await widget.store.save(alarm);
-    HapticFeedback.mediumImpact();
-    if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(const SnackBar(content: Text('Alarm saved')));
-    await Future.delayed(const Duration(milliseconds: 500));
-    if (mounted) Navigator.pop(context);
+    try {
+      await widget.store.save(alarm);
+      HapticFeedback.mediumImpact();
+      if (!mounted) return;
+      final message = widget.store.lastNotificationError == null
+          ? 'Alarm saved and scheduled'
+          : 'Alarm saved. Allow notifications in Android Settings to receive alerts.';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+      );
+      await Future.delayed(const Duration(milliseconds: 700));
+      if (mounted) Navigator.pop(context);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not save this alarm. Please try again.'),
+        ),
+      );
+    }
   }
 }
 
@@ -766,6 +911,8 @@ class ArcDial extends StatefulWidget {
 
 class _ArcDialState extends State<ArcDial> {
   int last = -1;
+  bool dragActive = false;
+
   void _update(Offset p, Size s) {
     final c = Offset(s.width / 2, s.height / 2);
     var a = math.atan2(p.dy - c.dy, p.dx - c.dx) + math.pi / 2;
@@ -799,9 +946,21 @@ class _ArcDialState extends State<ArcDial> {
             ? '${widget.hour}'
             : '${widget.minute}',
         child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onPanDown: (d) => _update(d.localPosition, s),
-          onPanUpdate: (d) => _update(d.localPosition, s),
+          behavior: HitTestBehavior.translucent,
+          onTapUp: (d) {
+            if (isPointOnDialRing(d.localPosition, s)) {
+              _update(d.localPosition, s);
+            }
+          },
+          onPanStart: (d) {
+            dragActive = isPointOnDialRing(d.localPosition, s);
+            if (dragActive) _update(d.localPosition, s);
+          },
+          onPanUpdate: (d) {
+            if (dragActive) _update(d.localPosition, s);
+          },
+          onPanEnd: (_) => dragActive = false,
+          onPanCancel: () => dragActive = false,
           child: CustomPaint(
             painter: DialPainter(
               widget.hour,
@@ -835,7 +994,7 @@ class _ArcDialState extends State<ArcDial> {
                     ),
                   ),
                   const Text(
-                    'drag to adjust',
+                    'drag the ring to adjust',
                     style: TextStyle(color: Colors.white38, fontSize: 12),
                   ),
                 ],
@@ -915,6 +1074,32 @@ class DialPainter extends CustomPainter {
 String timeText(int h, int m, bool use24) => use24
     ? '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}'
     : '${(h % 12 == 0 ? 12 : h % 12).toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')} ${h >= 12 ? 'PM' : 'AM'}';
+bool isPointOnDialRing(Offset point, Size size) {
+  final center = Offset(size.width / 2, size.height / 2);
+  final distance = (point - center).distance;
+  final radius = size.shortestSide * .41;
+  // A generous 52 px band is comfortable without making the entire dial hot.
+  return (distance - radius).abs() <= 26;
+}
+
+String alarmInText(int hour, int minute, [Set<int>? repeatDays]) {
+  final now = DateTime.now();
+  var next = DateTime(now.year, now.month, now.day, hour, minute);
+  final days = repeatDays ?? const <int>{};
+  while (!next.isAfter(now) ||
+      (days.isNotEmpty && !days.contains(next.weekday))) {
+    next = next.add(const Duration(days: 1));
+  }
+  final difference = next.difference(now);
+  final totalMinutes =
+      difference.inMinutes + (difference.inSeconds % 60 > 0 ? 1 : 0);
+  final hours = totalMinutes ~/ 60;
+  final minutes = totalMinutes % 60;
+  if (hours == 0) return 'Alarm in $minutes min';
+  if (minutes == 0) return 'Alarm in ${hours}h';
+  return 'Alarm in ${hours}h ${minutes}m';
+}
+
 String daysText(Set<int> d) {
   if (d.isEmpty) return 'Once';
   if (d.length == 7) return 'Every day';

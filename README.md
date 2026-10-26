@@ -5,10 +5,13 @@ A premium Flutter alarm application centered around an interactive circular time
 ## Features
 
 - Custom-painted arc dial with drag gestures, tick marks, gradient progress, and haptic feedback
+- Ring-only touch handling plus precise one-step hour/minute controls
 - Separate hour and minute adjustment modes
 - 12-hour and 24-hour formats with independent AM/PM selection
 - Alarm labels, weekday repetition, vibration, sound, snooze, and gradual-volume options
 - Persistent alarm storage and scheduled Android local notifications
+- Optional 10-minute upcoming-alarm reminders
+- One-tap repeat presets for once, weekdays, weekends, and every day
 - Create, edit, enable, disable, and swipe-to-delete alarm flows
 - Responsive dark interface designed for one-handed use
 - TalkBack semantics for the primary time-selection control

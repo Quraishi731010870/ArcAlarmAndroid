@@ -1,5 +1,6 @@
 import 'package:arc_alarm_android/main.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/widgets.dart';
 
 void main() {
   test('formats 12 and 24 hour time', () {
@@ -12,5 +13,12 @@ void main() {
     expect(daysText({}), 'Once');
     expect(daysText({1, 2, 3, 4, 5}), 'Weekdays');
     expect(daysText({1, 2, 3, 4, 5, 6, 7}), 'Every day');
+  });
+
+  test('dial only accepts interaction near its ring', () {
+    const size = Size(360, 360);
+    expect(isPointOnDialRing(const Offset(180, 180), size), isFalse);
+    expect(isPointOnDialRing(const Offset(180, 32.4), size), isTrue);
+    expect(isPointOnDialRing(const Offset(8, 8), size), isFalse);
   });
 }
